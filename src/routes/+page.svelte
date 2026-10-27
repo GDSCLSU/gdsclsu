@@ -309,7 +309,7 @@
 
         <!-- svelte-ignore a11y_consider_explicit_label -->
         <a
-          href="https://github.com/Google-Developers-Student-Club-LSU"
+          href="https://github.com/gdsclsu"
           target="_blank"
           rel="noopener noreferrer"
           aria-label="GitHub"
