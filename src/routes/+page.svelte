@@ -247,7 +247,7 @@
 
         <!-- svelte-ignore a11y_consider_explicit_label -->
         <a
-          href="https://discord.gg/XFyWUatnH"
+          href="https://discord.gg/4aJU7UHUE2"
           target="_blank"
           rel="noopener noreferrer"
           aria-label="Discord"
