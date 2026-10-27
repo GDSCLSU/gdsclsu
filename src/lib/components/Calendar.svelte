@@ -104,8 +104,6 @@
     { key: "mint", label: "Pastel Mint", hex: "#b2dfdb" },
   ];
 
-  // Maps colors from the old palette to their closest new hue so existing
-  // events keep a sensible look instead of falling back to the first color.
   const LEGACY_COLOR_MAP: Record<string, string> = {
     banana: "yellow",
     tangerine: "peach",
@@ -719,10 +717,10 @@
     const container = timeSlotsContainer || calendarBody;
 
     const weekDays = getWeekDays(currentDate);
-    const dayIndex = weekDays.findIndex(
-      (d) => formatDate(d) === formatDate(day),
-    );
+    const dayStr = formatDate(day);
+    const dayIndex = weekDays.findIndex((d) => formatDate(d) === dayStr);
     if (dayIndex === -1) return;
+    const isEndDay = isContinuation && event.endDate === dayStr;
 
     const eventElement = document.createElement("div");
     const typeClass =
@@ -731,14 +729,23 @@
       event.type === "easter-egg" && claimedEggIds.includes(event.id)
         ? " event-claimed"
         : "";
-    eventElement.className = `event event-${event.color}${typeClass}${claimedClass}`;
+    const continuesClass = isContinuation ? " event-continues" : "";
+    eventElement.className = `event event-${event.color}${typeClass}${claimedClass}${continuesClass}`;
     const startTimeAmPm = formatTimeWithAmPm(event.startTime);
     const endTimeAmPm = formatTimeWithAmPm(event.endTime);
     const typeIcon =
       event.type === "task" ? "📌" : event.type === "easter-egg" ? "🥚" : "";
     const contIcon = isContinuation ? "↪ " : "";
-    eventElement.innerHTML = `<div class="event-title">${contIcon}${typeIcon} ${event.title}${eggBadge(event)}</div><div class="event-time">${startTimeAmPm} - ${endTimeAmPm}</div>`;
+    const timeLine = !isContinuation
+      ? `<div class="event-time">${startTimeAmPm} - ${endTimeAmPm}</div>`
+      : isEndDay
+        ? `<div class="event-time">Until ${endTimeAmPm}</div>`
+        : "";
+    eventElement.innerHTML = `<div class="event-title">${contIcon}${typeIcon} ${event.title}${eggBadge(event)}</div>${timeLine}`;
     eventElement.dataset.eventId = event.id;
+    if (isContinuation) {
+      eventElement.title = `${event.title} (continues from ${event.date})`;
+    }
 
     const startParts = event.startTime.split(":");
     const endParts = event.endTime.split(":");
@@ -753,11 +760,17 @@
 
     const pxPerHour = 60;
     const minutesFromMidnight = startHour * 60 + startMinute;
-    const topPx = timeSlotsContainer
-      ? minutesFromMidnight
-      : minutesFromMidnight + 60;
-    const durationMinutes =
-      (endHour - startHour) * 60 + (endMinute - startMinute);
+    const endMinutesFromMidnight = endHour * 60 + endMinute;
+    const topPx = isContinuation
+      ? 0
+      : timeSlotsContainer
+        ? minutesFromMidnight
+        : minutesFromMidnight + 60;
+    const durationMinutes = isContinuation
+      ? isEndDay && endMinutesFromMidnight > 0
+        ? endMinutesFromMidnight
+        : 24 * 60
+      : (endHour - startHour) * 60 + (endMinute - startMinute);
     const heightPx = Math.max(20, durationMinutes);
 
     const slotWidthPct = 100 / 7;
@@ -2477,6 +2490,10 @@
     padding: 4px 8px;
   }
 
+  :global(.event-continues) {
+    box-sizing: border-box;
+  }
+
   :global(.event:hover) {
     filter: brightness(1.08);
     box-shadow: var(--gcal-shadow-2);
@@ -2509,7 +2526,6 @@
   :global(.event-mint) {
     background-color: #b2dfdb;
   }
-  /* Legacy keys mapped to the new palette */
   :global(.event-orange) {
     background-color: #ffccbc;
   }
@@ -2586,7 +2602,6 @@
     color: var(--ev-text);
     border-left: 3px solid #b2dfdb;
   }
-  /* Legacy keys mapped to the new palette */
   :global(.event-orange) {
     --ev: #ffccbc;
     background: color-mix(in srgb, #ffccbc 26%, var(--gcal-surface));
