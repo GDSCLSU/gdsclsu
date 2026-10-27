@@ -10,7 +10,12 @@ import { getAuth } from "firebase-admin/auth";
 import type { Auth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
 import type { Firestore } from "firebase-admin/firestore";
+import { env as dynamicPrivateEnv } from "$env/dynamic/private";
 import { gcpConfig } from "./gcp.config";
+
+export function serverEnv(name: string): string | undefined {
+  return dynamicPrivateEnv[name] ?? process.env[name];
+}
 
 const WIF_DIR = "/tmp/gdsc-wif";
 const WIF_TOKEN_PATH = `${WIF_DIR}/subject-token`;
@@ -23,7 +28,7 @@ function tokenFromRequest(request?: Request): string | undefined {
     const header = request.headers.get("x-vercel-oidc-token");
     if (header) return header;
   }
-  return process.env.VERCEL_OIDC_TOKEN || undefined;
+  return serverEnv("VERCEL_OIDC_TOKEN") || undefined;
 }
 
 function writeWifConfig(): boolean {
@@ -72,9 +77,9 @@ function adminApp(token?: string): App | null {
     return existing;
   }
 
-  const projectId = process.env.FIREBASE_PROJECT_ID;
-  const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
-  const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n");
+  const projectId = serverEnv("FIREBASE_PROJECT_ID");
+  const clientEmail = serverEnv("FIREBASE_CLIENT_EMAIL");
+  const privateKey = serverEnv("FIREBASE_PRIVATE_KEY")?.replace(/\\n/g, "\n");
   if (projectId && clientEmail && privateKey) {
     return initializeApp({
       credential: cert({ projectId, clientEmail, privateKey }),

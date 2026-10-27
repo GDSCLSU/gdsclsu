@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { browser } from "$app/environment";
+  import { onDestroy, onMount, tick } from "svelte";
   import { auth } from "$lib/firebase/auth";
   import { authState } from "$lib/firebase/auth.svelte";
   import * as database from "$lib/firebase/database";
@@ -49,6 +50,12 @@
 
   let events: Event[] = $state([]);
   let loadingEvents: boolean = $state(true);
+  let syncing: boolean = $state(false);
+  let syncStatus: { tone: "success" | "error"; message: string } | null =
+    $state(null);
+  let syncStatusTimer: ReturnType<typeof setTimeout> | undefined;
+  let nowTimer: ReturnType<typeof setInterval> | undefined;
+  let toolbarObserver: ResizeObserver | undefined;
   let eggClaimCounts: Record<string, number> = $state({});
   let editingEventId = $state<string | null>(null);
   let selectedEvent: Event | null = $state(null);
@@ -328,8 +335,10 @@
       const headerCell = document.createElement("div");
       headerCell.className = "week-day-header";
       headerCell.innerHTML = `
-                <div class="week-day-name">${WEEKDAY_NAMES[day.getDay()]}</div>
-                <div class="week-day-number ${isToday(day) ? "today" : ""}">${day.getDate()}</div>
+                <div class="week-day-heading">
+                    <div class="week-day-name">${WEEKDAY_NAMES[day.getDay()]}</div>
+                    <div class="week-day-number ${isToday(day) ? "today" : ""}">${day.getDate()}</div>
+                </div>
                 <div class="week-day-allday" data-date="${formatDate(day)}"></div>
             `;
       headerRow.appendChild(headerCell);
@@ -359,6 +368,17 @@
     }
 
     calendarBody.appendChild(timeSlotsContainer);
+
+    const todayIndex = weekDays.findIndex((day) => isToday(day));
+
+    if (todayIndex !== -1) {
+      const nowLine = document.createElement("div");
+      nowLine.className = "now-line";
+      nowLine.style.left = `${(todayIndex * 100) / 7}%`;
+      nowLine.style.width = `${100 / 7}%`;
+      timeSlotsContainer.appendChild(nowLine);
+      updateNowLine();
+    }
   }
 
   function generateMonthView() {
@@ -683,7 +703,8 @@
         `.week-day-allday[data-date="${formatDate(day)}"]`,
       ) as HTMLElement;
       const slot = alldayContainer || calendarBody;
-      const eventElement = document.createElement("div");
+      const eventElement = document.createElement("button");
+      eventElement.type = "button";
       const typeClass =
         event.type && event.type !== "event" ? ` event-${event.type}` : "";
       const claimedClass =
@@ -722,7 +743,8 @@
     if (dayIndex === -1) return;
     const isEndDay = isContinuation && event.endDate === dayStr;
 
-    const eventElement = document.createElement("div");
+    const eventElement = document.createElement("button");
+    eventElement.type = "button";
     const typeClass =
       event.type && event.type !== "event" ? ` event-${event.type}` : "";
     const claimedClass =
@@ -802,7 +824,8 @@
     const eventsContainer = cell.querySelector(".month-day-events");
     if (!eventsContainer) return;
 
-    const eventElement = document.createElement("div");
+    const eventElement = document.createElement("button");
+    eventElement.type = "button";
     const typeClass =
       event.type && event.type !== "event" ? ` event-${event.type}` : "";
     const claimedClass =
@@ -813,10 +836,20 @@
     const typeIcon =
       event.type === "task" ? "📌 " : event.type === "easter-egg" ? "🥚 " : "";
     const contIcon = isContinuation ? "↪ " : "";
-    eventElement.textContent = `${contIcon}${typeIcon}${event.title}${eggBadge(event)}`;
-    eventElement.dataset.eventId = event.id;
     const isAllDayEvent =
       event.allDay || (!!event.type && event.type !== "event");
+    const label = `${contIcon}${typeIcon}${event.title}${eggBadge(event)}`;
+
+    if (isAllDayEvent || isContinuation) {
+      eventElement.textContent = label;
+    } else {
+      const timeLabel = document.createElement("span");
+      timeLabel.className = "month-event-time";
+      timeLabel.textContent = formatTimeWithAmPm(event.startTime);
+      eventElement.append(timeLabel, document.createTextNode(` ${label}`));
+    }
+
+    eventElement.dataset.eventId = event.id;
     eventElement.title = isAllDayEvent
       ? `${event.title} (all day)`
       : `${event.title} (${event.startTime} – ${event.endTime})`;
@@ -837,6 +870,7 @@
       }
       generateMonthView();
       renderEvents();
+      fitMonthView();
       return;
     }
 
@@ -847,6 +881,7 @@
 
     generateWeekView();
     renderEvents();
+    fitMonthView();
     setTimeout(scrollToStartOfDay, 50);
   }
 
@@ -965,30 +1000,130 @@
     }
   }
 
+  function showSyncStatus(tone: "success" | "error", message: string) {
+    if (syncStatusTimer) clearTimeout(syncStatusTimer);
+    syncStatus = { tone, message };
+    syncStatusTimer = setTimeout(
+      () => {
+        syncStatus = null;
+      },
+      tone === "error" ? 12000 : 6000,
+    );
+  }
+
+  function clearSyncStatus() {
+    if (syncStatusTimer) clearTimeout(syncStatusTimer);
+    syncStatusTimer = undefined;
+    syncStatus = null;
+  }
+
+  function updateNowLine() {
+    if (!calendarBody) return;
+    const line = calendarBody.querySelector(".now-line") as HTMLElement | null;
+    if (!line) return;
+    const now = new Date();
+    line.style.top = `${now.getHours() * 60 + now.getMinutes()}px`;
+  }
+
+  function fitMonthView() {
+    if (!calendarContainer) return;
+
+    if (currentView !== "month") {
+      calendarContainer.style.height = "";
+      return;
+    }
+
+    const toolbar = document.querySelector(".toolbar") as HTMLElement | null;
+    const toolbarHeight = toolbar?.getBoundingClientRect().height ?? 0;
+    const available = window.innerHeight - toolbarHeight - 36;
+
+    calendarContainer.style.height = `${Math.max(560, available)}px`;
+  }
+
+  async function loadEvents() {
+    const querySnapshot = await getDocs(collection(database.db, "events"));
+    events = querySnapshot.docs.map((doc) => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        title: data.title,
+        description: data.description,
+        date: data.date,
+        endDate: data.endDate ?? null,
+        startTime: data.startTime,
+        endTime: data.endTime,
+        color: data.color,
+        featured: data.featured || false,
+        rsvpLink: data.rsvpLink,
+        type: data.type as EventType | undefined,
+        points: data.points,
+        allDay: data.allDay || false,
+      };
+    }) as Event[];
+  }
+
+  async function syncEventsNow() {
+    if (!authState.isOfficer || syncing) return;
+
+    const user = auth?.currentUser;
+    if (!user) {
+      showSyncStatus("error", "Sign in again to sync events.");
+      return;
+    }
+
+    clearSyncStatus();
+    syncing = true;
+
+    try {
+      const token = await user.getIdToken();
+      const response = await fetch("/api/sync-events", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const result = (await response.json().catch(() => null)) as {
+        ok?: boolean;
+        error?: string;
+        created?: number;
+        updated?: number;
+        skipped?: number;
+      } | null;
+
+      if (!response.ok || !result?.ok) {
+        showSyncStatus(
+          "error",
+          result?.error || "Could not sync events. Try again.",
+        );
+        return;
+      }
+
+      await loadEvents();
+      renderEvents();
+      showSyncStatus(
+        "success",
+        `Synced: ${result.created ?? 0} added, ${result.updated ?? 0} updated, ${result.skipped ?? 0} past skipped.`,
+      );
+    } catch (error) {
+      console.error("Failed to sync GDG events:", error);
+      showSyncStatus("error", "Could not reach the sync service. Try again.");
+    } finally {
+      syncing = false;
+    }
+  }
+
   onMount(async () => {
     updateDateDisplay();
     setupEventListeners();
+    nowTimer = setInterval(updateNowLine, 60000);
+    window.addEventListener("resize", fitMonthView);
+
+    const toolbar = document.querySelector(".toolbar");
+
+    if (toolbar) {
+      toolbarObserver = new ResizeObserver(fitMonthView);
+      toolbarObserver.observe(toolbar);
+    }
 
     try {
-      const querySnapshot = await getDocs(collection(database.db, "events"));
-      events = querySnapshot.docs.map((doc) => {
-        const data = doc.data();
-        return {
-          id: doc.id,
-          title: data.title,
-          description: data.description,
-          date: data.date,
-          endDate: data.endDate ?? null,
-          startTime: data.startTime,
-          endTime: data.endTime,
-          color: data.color,
-          featured: data.featured || false,
-          rsvpLink: data.rsvpLink,
-          type: data.type as EventType | undefined,
-          points: data.points,
-          allDay: data.allDay || false,
-        };
-      }) as Event[];
+      await loadEvents();
     } catch (error) {
       console.error("Failed ot load events from database:", error);
     } finally {
@@ -998,6 +1133,16 @@
     tick().then(() => {
       renderCalendar();
     });
+  });
+
+  onDestroy(() => {
+    if (syncStatusTimer) clearTimeout(syncStatusTimer);
+    if (nowTimer) clearInterval(nowTimer);
+    toolbarObserver?.disconnect();
+
+    if (browser) {
+      window.removeEventListener("resize", fitMonthView);
+    }
   });
 </script>
 
@@ -1238,6 +1383,28 @@
         >
       </div>
       {#if authState.isOfficer}
+        <button
+          class="btn btn-secondary btn-sync"
+          onclick={syncEventsNow}
+          disabled={syncing}
+          aria-busy={syncing}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="18"
+            height="18"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            class={syncing ? "spin" : ""}
+          >
+            <path d="M20 11a8 8 0 1 0-2.3 6.3" />
+            <path d="M20 4v7h-7" />
+          </svg>
+          <span>{syncing ? "Syncing…" : "Sync now"}</span>
+        </button>
         <button class="btn btn-create" onclick={() => openEventModal()}>
           <svg
             viewBox="0 0 24 24"
@@ -1251,6 +1418,48 @@
           >
           <span>Create</span>
         </button>
+        <p
+          class="sync-status {syncStatus?.tone ?? ''}"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          title={syncStatus?.message ?? ''}
+        >
+          {#if syncStatus}
+            {#if syncStatus.tone === "error"}
+              <svg
+                viewBox="0 0 24 24"
+                width="15"
+                height="15"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 8v4" />
+                <path d="M12 16h.01" />
+              </svg>
+            {:else}
+              <svg
+                viewBox="0 0 24 24"
+                width="15"
+                height="15"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M20 6L9 17l-5-5" />
+              </svg>
+            {/if}
+            <span>{syncStatus.message}</span>
+          {/if}
+        </p>
       {/if}
     </div>
   </div>
@@ -1639,6 +1848,9 @@
       0 2px 6px rgba(60, 64, 67, 0.14), 0 1px 2px rgba(60, 64, 67, 0.1);
     --gcal-shadow-3:
       0 8px 24px rgba(60, 64, 67, 0.2), 0 2px 6px rgba(60, 64, 67, 0.12);
+    --gcal-success: #1e8e3e;
+    --gcal-danger: #d93025;
+    --gcal-now: #ea4335;
   }
 
   :global(.dark) {
@@ -1654,6 +1866,9 @@
     --gcal-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
     --gcal-shadow-2: 0 2px 6px rgba(0, 0, 0, 0.4);
     --gcal-shadow-3: 0 8px 28px rgba(0, 0, 0, 0.55);
+    --gcal-success: #81c995;
+    --gcal-danger: #f28b82;
+    --gcal-now: #f28b82;
   }
 
   .container {
@@ -1785,6 +2000,7 @@
   .upcoming-date-day {
     font-size: 16px;
     font-weight: 700;
+    font-variant-numeric: tabular-nums;
   }
 
   .upcoming-info {
@@ -1806,6 +2022,7 @@
   .upcoming-time {
     font-size: 12px;
     color: var(--gcal-text-muted);
+    font-variant-numeric: tabular-nums;
   }
 
   .featured-card {
@@ -2020,6 +2237,7 @@
     font-size: 13px;
     color: var(--gcal-text-muted);
     font-weight: 500;
+    font-variant-numeric: tabular-nums;
   }
 
   .toolbar-titles .date-display {
@@ -2035,7 +2253,9 @@
   .toolbar-actions {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 12px;
+    row-gap: 8px;
     margin-left: auto;
   }
 
@@ -2107,7 +2327,10 @@
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
-    transition: all 0.15s ease;
+    transition:
+      background-color 0.15s ease,
+      box-shadow 0.15s ease,
+      color 0.15s ease;
     color: var(--gcal-text-muted);
   }
 
@@ -2133,6 +2356,58 @@
   .btn-create:hover {
     box-shadow: var(--gcal-shadow-3);
     transform: translateY(-1px);
+  }
+
+  .btn-sync {
+    padding: 10px 16px;
+    font-weight: 600;
+  }
+
+  .btn-sync:disabled {
+    opacity: 0.75;
+    cursor: default;
+    box-shadow: none;
+    transform: none;
+  }
+
+  .btn-sync .spin {
+    animation: gcal-spin 0.9s linear infinite;
+  }
+
+  @keyframes gcal-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .sync-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    max-width: 320px;
+    margin: 0;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--gcal-text-muted);
+  }
+
+  .sync-status span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .sync-status svg {
+    flex-shrink: 0;
+  }
+
+  .sync-status.success svg {
+    color: var(--gcal-success);
+  }
+
+  .sync-status.error {
+    color: var(--gcal-danger);
   }
 
   .btn-primary {
@@ -2263,6 +2538,27 @@
     );
   }
 
+  :global(.now-line) {
+    position: absolute;
+    height: 2px;
+    background: var(--gcal-now);
+    z-index: 15;
+    pointer-events: none;
+    transform: translateY(-1px);
+  }
+
+  :global(.now-line::before) {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: -3px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--gcal-now);
+    transform: translateY(-50%);
+  }
+
   :global(.week-day-header) {
     min-height: 88px;
     padding: 0;
@@ -2273,6 +2569,16 @@
     border-right: 1px solid var(--gcal-outline-soft);
   }
 
+  :global(.week-day-heading) {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 0;
+    width: 100%;
+  }
+
   :global(.week-day-allday) {
     display: flex;
     flex-direction: column;
@@ -2281,7 +2587,8 @@
     width: 100%;
     margin-top: 2px;
     padding: 0 2px 2px;
-    flex: 1;
+    flex: 0 1 auto;
+    max-height: 40px;
     min-height: 0;
     overflow-y: auto;
     scrollbar-width: thin;
@@ -2320,6 +2627,7 @@
     font-size: 16px;
     color: var(--gcal-text);
     font-weight: 500;
+    font-variant-numeric: tabular-nums;
   }
 
   :global(.week-day-number.today) {
@@ -2352,12 +2660,17 @@
   }
 
   .month-container {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
     padding: 16px;
   }
 
   .month-body {
     display: flex;
     flex-direction: column;
+    flex: 1;
+    min-height: 0;
   }
 
   :global(.month-header) {
@@ -2382,6 +2695,8 @@
 
   :global(.month-grid) {
     display: grid;
+    flex: 1;
+    min-height: 0;
     grid-template-columns: repeat(7, 1fr);
     grid-auto-rows: 1fr;
     gap: 1px;
@@ -2392,7 +2707,7 @@
   :global(.month-day-cell) {
     --cell-bg: var(--gcal-surface);
     background: var(--cell-bg);
-    height: 100px;
+    height: auto;
     padding: 6px 6px 8px;
     cursor: pointer;
     transition: background-color 0.15s ease;
@@ -2429,6 +2744,7 @@
     align-items: center;
     justify-content: center;
     border-radius: 50%;
+    font-variant-numeric: tabular-nums;
   }
 
   :global(.month-day-events) {
@@ -2438,6 +2754,7 @@
     flex-direction: column;
     gap: 2px;
     position: relative;
+    overflow: hidden;
   }
 
   :global(.month-day-events:has(.event:nth-child(n + 4)))::after {
@@ -2467,11 +2784,16 @@
   }
 
   :global(.event) {
+    border: 0;
     border-radius: 4px;
     padding: 3px 7px;
+    font-family: inherit;
     font-size: 11px;
     font-weight: 500;
+    line-height: 1.25;
+    text-align: left;
     color: white;
+    background: transparent;
     cursor: pointer;
     transition:
       filter 0.15s ease,
@@ -2480,6 +2802,12 @@
     z-index: 10;
     white-space: nowrap;
     text-overflow: ellipsis;
+  }
+
+  :global(.event:focus-visible) {
+    outline: 2px solid var(--gcal-text);
+    outline-offset: 2px;
+    z-index: 20;
   }
 
   :global(.event:not(.month-event)) {
@@ -2646,6 +2974,13 @@
     text-overflow: ellipsis;
   }
 
+  :global(.month-event-time) {
+    margin-right: 2px;
+    font-weight: 500;
+    opacity: 0.78;
+    font-variant-numeric: tabular-nums;
+  }
+
   :global(.event-title) {
     font-weight: 600;
     font-size: 11px;
@@ -2655,6 +2990,7 @@
     font-size: 10px;
     opacity: 0.9;
     margin-top: 1px;
+    font-variant-numeric: tabular-nums;
   }
 
   :global(.event-task) {
@@ -2767,6 +3103,14 @@
     .modal.open,
     .modal.detail-modal,
     .modal-content {
+      animation: none;
+    }
+
+    .btn-sync .spin {
+      animation: none;
+    }
+
+    :global(.event-pulse) {
       animation: none;
     }
   }
@@ -2896,7 +3240,11 @@
     font-family: inherit;
     font-weight: 600;
     cursor: pointer;
-    transition: all 0.15s ease;
+    transition:
+      background-color 0.15s ease,
+      border-color 0.15s ease,
+      box-shadow 0.15s ease,
+      color 0.15s ease;
   }
 
   .type-option:hover {
@@ -2993,7 +3341,9 @@
     align-items: center;
     justify-content: center;
     border-radius: 50%;
-    transition: all 0.15s ease;
+    transition:
+      background-color 0.15s ease,
+      color 0.15s ease;
   }
 
   .btn-close:hover {
@@ -3088,6 +3438,12 @@
       justify-content: space-between;
     }
 
+    .sync-status {
+      flex-basis: 100%;
+      max-width: none;
+      justify-content: flex-end;
+    }
+
     .view-switcher {
       flex: 1;
     }
@@ -3106,9 +3462,6 @@
       min-width: 52px;
     }
 
-    :global(.month-day-cell) {
-      min-height: 60px;
-    }
 
     .form-row {
       grid-template-columns: 1fr;

@@ -1,11 +1,26 @@
-const env = process.env;
+import { env as dynamicPrivateEnv } from "$env/dynamic/private";
+
+function value(name: string, fallback: string): string {
+  return dynamicPrivateEnv[name] ?? process.env[name] ?? fallback;
+}
 
 export const gcpConfig = {
-  projectId: env.FIREBASE_PROJECT_ID || "gdsc-lsu-website-db",
-  projectNumber: env.FIREBASE_PROJECT_NUMBER || "385852041539",
-  workloadIdentityPoolId: env.FIREBASE_WIF_POOL_ID || "vercel",
-  workloadIdentityProviderId: env.FIREBASE_WIF_PROVIDER_ID || "vercel",
-  serviceAccountEmail:
-    env.FIREBASE_SERVICE_ACCOUNT_EMAIL ||
-    "firebase-adminsdk-fbsvc@gdsc-lsu-website-db.iam.gserviceaccount.com",
+  get projectId() {
+    return value("FIREBASE_PROJECT_ID", "gdsc-lsu-website-db");
+  },
+  get projectNumber() {
+    return value("FIREBASE_PROJECT_NUMBER", "385852041539");
+  },
+  get workloadIdentityPoolId() {
+    return value("FIREBASE_WIF_POOL_ID", "vercel");
+  },
+  get workloadIdentityProviderId() {
+    return value("FIREBASE_WIF_PROVIDER_ID", "vercel");
+  },
+  get serviceAccountEmail() {
+    return value(
+      "FIREBASE_SERVICE_ACCOUNT_EMAIL",
+      "firebase-adminsdk-fbsvc@gdsc-lsu-website-db.iam.gserviceaccount.com",
+    );
+  },
 };
