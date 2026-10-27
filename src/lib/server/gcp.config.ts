@@ -1,4 +1,5 @@
 import { env as dynamicPrivateEnv } from "$env/dynamic/private";
+import { env as dynamicPublicEnv } from "$env/dynamic/public";
 
 function value(name: string, fallback: string): string {
   return dynamicPrivateEnv[name] ?? process.env[name] ?? fallback;
@@ -6,7 +7,10 @@ function value(name: string, fallback: string): string {
 
 export const gcpConfig = {
   get projectId() {
-    return value("FIREBASE_PROJECT_ID", "gdsc-lsu-website-db");
+    return value(
+      "FIREBASE_PROJECT_ID",
+      dynamicPublicEnv.PUBLIC_PROJECT_ID || "gdsc-lsu-website-db",
+    );
   },
   get projectNumber() {
     return value("FIREBASE_PROJECT_NUMBER", "385852041539");

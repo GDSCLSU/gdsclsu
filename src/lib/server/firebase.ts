@@ -77,13 +77,13 @@ function adminApp(token?: string): App | null {
     return existing;
   }
 
-  const projectId = serverEnv("FIREBASE_PROJECT_ID");
+  const projectId = gcpConfig.projectId;
   const clientEmail = serverEnv("FIREBASE_CLIENT_EMAIL");
   const privateKey = serverEnv("FIREBASE_PRIVATE_KEY")?.replace(/\\n/g, "\n");
-  if (projectId && clientEmail && privateKey) {
+  if (clientEmail && privateKey) {
     return initializeApp({
       credential: cert({ projectId, clientEmail, privateKey }),
-      projectId: gcpConfig.projectId,
+      projectId,
     });
   }
 
